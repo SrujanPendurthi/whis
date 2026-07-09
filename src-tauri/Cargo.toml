@@ -1,0 +1,62 @@
+[package]
+name = "whis"
+version = "0.1.0"
+description = "whis — local, privacy-first study AI"
+authors = ["Srujan Pendurthi"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name (Windows, see
+# https://github.com/rust-lang/cargo/issues/8519).
+name = "whis_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+# Serialization / IPC payloads
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime + HTTP (inference client, anki, scrapers)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Error handling
+thiserror = "2"
+
+# Vector database (embedded). Arrow crates are pinned to the version lancedb
+# re-exports so RecordBatch/Schema types are ABI-compatible.
+lancedb = "0.31.0"
+arrow-array = "58"
+arrow-schema = "58"
+
+# Local embedding pipeline: candle runs bge-small-en-v1.5; tokenizers provides
+# the WordPiece tokenizer; hf-hub fetches the model weights on first run.
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+tokenizers = "0.23.1"
+hf-hub = { version = "0.5.0", features = ["tokio"] }
+
+# Ingestion: document parsers + web/YouTube scrapers.
+pdf-extract = "0.12.0"       # PDF text extraction
+zip = "8.6.0"                # .pptx is a zip of XML slides
+quick-xml = "0.41.0"         # parse pptx slide XML + youtube timedtext
+regex = "1.12.4"             # youtube video-id extraction
+chromiumoxide = "0.9.1"      # headless-Chrome scraping of dynamic pages
+
+[features]
+# Off by default so the project builds under Command Line Tools alone.
+# Enable (`cargo build --features metal`) to run embeddings on the Apple GPU;
+# requires the full Xcode toolchain to compile candle's Metal shaders.
+default = []
+metal = ["candle-core/metal", "candle-nn/metal"]
