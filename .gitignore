@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Containerized dev store (docker-compose WHIS_DATA_DIR)
+.docker-data
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

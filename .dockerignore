@@ -1,0 +1,24 @@
+# Keep the build context tiny and platform-clean. In particular, host
+# node_modules (darwin binaries) and target/ (mach-o objects) must never enter
+# the Linux image — the container installs/builds its own via named volumes.
+.git
+.gitignore
+node_modules
+dist
+dist-ssr
+src-tauri/target
+target
+
+# Docker/CI meta
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Editor / OS cruft
+.vscode
+.idea
+.DS_Store
+*.log
+
+# Scratch
+*.local

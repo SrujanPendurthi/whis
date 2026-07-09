@@ -37,6 +37,18 @@ cargo clippy                # lint
 cargo fmt                   # format
 ```
 
+**Docker (reproducible deps + CI, from repo root):**
+The `Dockerfile` bakes the full toolchain (Rust 1.96, Node 24, `protoc`, WebKitGTK/Tauri Linux deps) so the checks below run without a host toolchain. It does NOT build the macOS `.app`/`.dmg` or run the GUI — those need macOS + Xcode natively (`npm run tauri build`). `docker-compose.yml` keeps `node_modules`/`target` in named volumes so the Linux container never collides with the host's macOS binaries.
+
+```bash
+docker compose build                              # build the toolchain image once
+docker compose run --rm dev npm install           # install JS deps in-container (first time)
+docker compose run --rm dev cargo test            # run the Rust suite
+docker compose run --rm dev cargo clippy --all-targets
+docker compose run --rm dev npm run build         # tsc + vite build
+docker compose run --rm dev                       # interactive shell
+```
+
 ## Key Cross-Cutting Facts
 
 - **External service ports (all localhost):** Higgs inference server on `127.0.0.1:8080` (OpenAI/Anthropic-compatible `/v1`); AnkiConnect on `127.0.0.1:8765`. Both are external processes the app talks to — neither is spawned by this app. Anki connection failures must degrade gracefully and never crash the Tauri thread.

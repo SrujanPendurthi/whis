@@ -1,0 +1,44 @@
+# whis — containerized dev/CI convenience.
+#
+# The `dev` service mounts the repo but keeps platform-specific build outputs in
+# named volumes so a macOS host and a Linux container never fight over the same
+# node_modules / target directory (different native binaries).
+#
+# Usage:
+#   docker compose build                       # build the toolchain image once
+#   docker compose run --rm dev npm install    # install JS deps *inside* the container
+#   docker compose run --rm dev cargo test     # run the Rust test suite
+#   docker compose run --rm dev cargo clippy --all-targets
+#   docker compose run --rm dev npm run build  # tsc + vite production build
+#   docker compose run --rm dev                # drop into an interactive shell
+#
+# Note: `npm run tauri dev`/`build` here would produce a *Linux* bundle and
+# cannot open a GUI window — build the macOS app natively on the host.
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: whis-dev
+    working_dir: /app
+    # Interactive by default; overridden by any command passed to `run`.
+    stdin_open: true
+    tty: true
+    environment:
+      # Keep the LanceDB store inside the workspace so it survives across runs.
+      WHIS_DATA_DIR: /app/.docker-data
+    volumes:
+      - .:/app
+      # Platform-isolated build caches (must NOT be the host's macOS versions).
+      - node_modules:/app/node_modules
+      - cargo-target:/app/src-tauri/target
+      # Speed up repeat builds by persisting the cargo caches.
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+
+volumes:
+  node_modules:
+  cargo-target:
+  cargo-registry:
+  cargo-git:
