@@ -4,7 +4,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Card, SourceInfo, StreamEvent } from "./types";
+import type { Card, ModelProfile, SourceInfo, StreamEvent } from "./types";
 
 export interface StreamHandlers {
   onToken?: (text: string) => void;
@@ -77,4 +77,12 @@ export const api = {
     invoke<Array<number | null>>("anki_sync_cards", { deck, cards }),
   serviceEndpoints: (): Promise<Record<string, string>> =>
     invoke<Record<string, string>>("service_endpoints"),
+
+  // --- Model profiles ---
+  listModels: (): Promise<ModelProfile[]> => invoke<ModelProfile[]>("list_models"),
+  activeModel: (): Promise<string | null> => invoke<string | null>("active_model"),
+  setActiveModel: (id: string): Promise<void> => invoke<void>("set_active_model", { id }),
+  saveModel: (profile: ModelProfile): Promise<void> => invoke<void>("save_model", { profile }),
+  deleteModel: (id: string): Promise<void> => invoke<void>("delete_model", { id }),
+  testModel: (id: string): Promise<void> => invoke<void>("test_model", { id }),
 };

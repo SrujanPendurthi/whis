@@ -1,11 +1,12 @@
-//! HTTP client for the local Higgs (MLX) inference server.
+//! HTTP client for an OpenAI-compatible inference server.
 //!
-//! Targets an OpenAI-compatible `/v1/chat/completions` endpoint on
-//! `127.0.0.1:8080`. Two entry points:
-//!   * [`HiggsClient::stream_chat`] — streams token deltas over a
+//! Targets a `/v1/chat/completions` endpoint — a local engine (Higgs on
+//! `127.0.0.1:8080`) or a remote provider (OpenAI/OpenRouter/Groq/…) selected
+//! via a [`ModelProfile`]. Two entry points:
+//!   * [`InferenceClient::stream_chat`] — streams token deltas over a
 //!     `tokio::sync::mpsc` channel (SSE, `stream: true`).
-//!   * [`HiggsClient::complete_structured`] — a single non-streamed call that
-//!     constrains output to a JSON Schema (used for strict card extraction).
+//!   * [`InferenceClient::complete_structured`] — a single non-streamed call
+//!     that constrains output to a JSON Schema (used for strict card extraction).
 //!
 //! The SSE decoding is factored into pure functions ([`parse_sse_line`]) so the
 //! wire protocol is unit-tested without needing a live server.
@@ -17,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::shared::config::HIGGS_BASE_URL;
 use crate::shared::error::{AppError, AppResult};
-use crate::shared::models::ChatMessage;
+use crate::shared::models::{ChatMessage, ModelProfile};
 
 /// Default model served by the local engine. Overridable per-request.
 const DEFAULT_MODEL: &str = "local";
@@ -40,32 +41,59 @@ impl Default for GenerationParams {
     }
 }
 
-/// Async client for the local inference server.
-#[derive(Debug, Clone)]
-pub struct HiggsClient {
-    http: reqwest::Client,
-    base_url: String,
+impl GenerationParams {
+    /// Params carrying a profile's model name and temperature.
+    pub fn from_profile(profile: &ModelProfile) -> Self {
+        Self { model: profile.model.clone(), temperature: profile.temperature, max_tokens: None }
+    }
 }
 
-impl Default for HiggsClient {
+/// Async client for an OpenAI-compatible inference server (a local engine like
+/// Higgs, or a remote provider such as OpenAI/OpenRouter/Groq). The target is
+/// just a base URL plus an optional bearer key.
+#[derive(Debug, Clone)]
+pub struct InferenceClient {
+    http: reqwest::Client,
+    base_url: String,
+    /// Bearer token; `None` (or empty) sends no `Authorization` header.
+    api_key: Option<String>,
+}
+
+impl Default for InferenceClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl HiggsClient {
-    /// Client pointed at the default local endpoint (`127.0.0.1:8080/v1`).
+impl InferenceClient {
+    /// Client pointed at the default local endpoint (`127.0.0.1:8080/v1`), no key.
     pub fn new() -> Self {
         Self::with_base_url(HIGGS_BASE_URL)
     }
 
-    /// Client pointed at an arbitrary base URL (used by tests / alt ports).
+    /// Client pointed at an arbitrary base URL, no auth (used by tests / alt ports).
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
-        Self { http: reqwest::Client::new(), base_url: base_url.into() }
+        Self { http: reqwest::Client::new(), base_url: base_url.into(), api_key: None }
+    }
+
+    /// Client configured from a user's [`ModelProfile`]: its base URL and, when
+    /// non-empty, its API key as a bearer token.
+    pub fn from_profile(profile: &ModelProfile) -> Self {
+        let api_key =
+            (!profile.api_key.trim().is_empty()).then(|| profile.api_key.trim().to_string());
+        Self { http: reqwest::Client::new(), base_url: profile.base_url.clone(), api_key }
     }
 
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Apply the bearer `Authorization` header when this client has a key.
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(key) => req.bearer_auth(key),
+            None => req,
+        }
     }
 
     /// Stream a chat completion. Returns immediately with a receiver; a spawned
@@ -79,8 +107,7 @@ impl HiggsClient {
     ) -> AppResult<mpsc::Receiver<AppResult<String>>> {
         let body = build_request_body(&messages, &params, true, None);
         let resp = self
-            .http
-            .post(self.chat_completions_url())
+            .authed(self.http.post(self.chat_completions_url()))
             .json(&body)
             .send()
             .await?
@@ -115,8 +142,7 @@ impl HiggsClient {
         let body = build_request_body(&messages, &params, false, Some(response_format));
 
         let resp = self
-            .http
-            .post(self.chat_completions_url())
+            .authed(self.http.post(self.chat_completions_url()))
             .json(&body)
             .send()
             .await?
@@ -133,6 +159,18 @@ impl HiggsClient {
             .ok_or_else(|| AppError::Inference("engine returned no choices".into()))?;
 
         serde_json::from_str(&content).map_err(AppError::from)
+    }
+
+    /// Lightweight reachability + auth check: `GET {base_url}/models`. Used by
+    /// the "Test" button so the user can validate a profile before selecting it.
+    pub async fn probe(&self) -> AppResult<()> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        self.authed(self.http.get(url))
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| AppError::Inference(e.to_string()))?;
+        Ok(())
     }
 }
 
@@ -320,5 +358,38 @@ mod tests {
         let body = build_request_body(&msgs, &GenerationParams::default(), false, Some(rf));
         assert_eq!(body["stream"], json!(false));
         assert_eq!(body["response_format"]["type"], json!("json_schema"));
+    }
+
+    fn profile(key: &str) -> ModelProfile {
+        ModelProfile {
+            id: "p".into(),
+            label: "P".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "gpt-x".into(),
+            api_key: key.into(),
+            temperature: 0.4,
+        }
+    }
+
+    #[test]
+    fn params_from_profile_carry_model_and_temperature() {
+        let p = GenerationParams::from_profile(&profile("k"));
+        assert_eq!(p.model, "gpt-x");
+        assert_eq!(p.temperature, 0.4);
+        assert!(p.max_tokens.is_none());
+    }
+
+    #[test]
+    fn client_from_profile_sets_key_and_base_url() {
+        let c = InferenceClient::from_profile(&profile("sk-123"));
+        assert_eq!(c.base_url, "https://api.example.com/v1");
+        assert_eq!(c.api_key.as_deref(), Some("sk-123"));
+        assert_eq!(c.chat_completions_url(), "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn client_from_profile_treats_blank_key_as_no_auth() {
+        let c = InferenceClient::from_profile(&profile("   "));
+        assert!(c.api_key.is_none());
     }
 }

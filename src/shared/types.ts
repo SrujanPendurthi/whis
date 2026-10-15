@@ -35,6 +35,16 @@ export interface Card {
   tags: string[];
 }
 
+/** A switchable inference target (mirrors Rust `ModelProfile`). */
+export interface ModelProfile {
+  id: string;
+  label: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  temperature: number;
+}
+
 /** Discriminated union mirroring Rust's `StreamEvent` (serde tag = "type"). */
 export type StreamEvent =
   | { type: "token"; text: string }

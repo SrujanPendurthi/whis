@@ -15,7 +15,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, streamCommand } from "../tauri";
-import type { Card, ChatTurn, Command, RightTab, SourceInfo } from "../types";
+import type { Card, ChatTurn, Command, ModelProfile, RightTab, SourceInfo } from "../types";
 
 interface ResearchState {
   logs: string[];
@@ -31,6 +31,8 @@ interface WhisState {
   sources: SourceInfo[];
   stagedCards: Card[];
   ankiOnline: boolean;
+  models: ModelProfile[];
+  activeModelId: string | null;
 }
 
 interface WhisActions {
@@ -43,6 +45,10 @@ interface WhisActions {
   removeCard: (index: number) => void;
   syncCards: (deck: string) => Promise<Array<number | null>>;
   refreshAnki: () => Promise<void>;
+  refreshModels: () => Promise<void>;
+  saveModel: (profile: ModelProfile) => Promise<void>;
+  deleteModel: (id: string) => Promise<void>;
+  selectModel: (id: string) => Promise<void>;
 }
 
 type WhisContextValue = WhisState & WhisActions;
@@ -69,6 +75,8 @@ export function WhisProvider({ children }: { children: ReactNode }) {
   const [sources, setSources] = useState<SourceInfo[]>([]);
   const [stagedCards, setStagedCards] = useState<Card[]>([]);
   const [ankiOnline, setAnkiOnline] = useState(false);
+  const [models, setModels] = useState<ModelProfile[]>([]);
+  const [activeModelId, setActiveModelId] = useState<string | null>(null);
 
   const busyRef = useRef(busy);
   busyRef.current = busy;
@@ -93,10 +101,42 @@ export function WhisProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshModels = useCallback(async () => {
+    try {
+      const [list, active] = await Promise.all([api.listModels(), api.activeModel()]);
+      setModels(list);
+      setActiveModelId(active);
+    } catch {
+      // Settings unavailable; leave model list empty.
+    }
+  }, []);
+
+  const selectModel = useCallback(async (id: string) => {
+    await api.setActiveModel(id);
+    setActiveModelId(id);
+  }, []);
+
+  const saveModel = useCallback(
+    async (profile: ModelProfile) => {
+      await api.saveModel(profile);
+      await refreshModels();
+    },
+    [refreshModels],
+  );
+
+  const deleteModel = useCallback(
+    async (id: string) => {
+      await api.deleteModel(id);
+      await refreshModels();
+    },
+    [refreshModels],
+  );
+
   useEffect(() => {
     void refreshSources();
     void refreshAnki();
-  }, [refreshSources, refreshAnki]);
+    void refreshModels();
+  }, [refreshSources, refreshAnki, refreshModels]);
 
   const submit = useCallback(
     async (input: string): Promise<void> => {
@@ -207,6 +247,8 @@ export function WhisProvider({ children }: { children: ReactNode }) {
       sources,
       stagedCards,
       ankiOnline,
+      models,
+      activeModelId,
       submit,
       setRightTab,
       refreshSources,
@@ -216,6 +258,10 @@ export function WhisProvider({ children }: { children: ReactNode }) {
       removeCard,
       syncCards,
       refreshAnki,
+      refreshModels,
+      saveModel,
+      deleteModel,
+      selectModel,
     }),
     [
       messages,
@@ -226,6 +272,8 @@ export function WhisProvider({ children }: { children: ReactNode }) {
       sources,
       stagedCards,
       ankiOnline,
+      models,
+      activeModelId,
       submit,
       refreshSources,
       ingest,
@@ -234,6 +282,10 @@ export function WhisProvider({ children }: { children: ReactNode }) {
       removeCard,
       syncCards,
       refreshAnki,
+      refreshModels,
+      saveModel,
+      deleteModel,
+      selectModel,
     ],
   );
 

@@ -6,14 +6,15 @@
 use tokio::sync::mpsc;
 
 use super::{forward_stream, format_context};
-use crate::features::inference::{GenerationParams, HiggsClient};
+use crate::features::inference::{GenerationParams, InferenceClient};
 use crate::features::vector_db::VectorIndex;
 use crate::shared::error::AppResult;
 use crate::shared::models::{ChatMessage, RetrievedChunk, StreamEvent};
 
 /// Retrieve context for `query`, then stream a grounded answer.
 pub async fn run(
-    client: &HiggsClient,
+    client: &InferenceClient,
+    params: &GenerationParams,
     index: &VectorIndex,
     query: &str,
     tx: &mpsc::Sender<StreamEvent>,
@@ -21,7 +22,8 @@ pub async fn run(
     // Retrieval failures (e.g. empty store) degrade to context-free answering.
     let chunks = index.retrieve(query).await.unwrap_or_default();
     let messages = build_prompt(query, &chunks);
-    let rx = client.stream_chat(messages, GenerationParams::default()).await?;
+    // Conversational chat honors the profile's temperature.
+    let rx = client.stream_chat(messages, params.clone()).await?;
     forward_stream(rx, tx).await
 }
 

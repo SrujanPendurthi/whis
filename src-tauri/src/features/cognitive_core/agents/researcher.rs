@@ -12,7 +12,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::{forward_stream, format_context, log};
-use crate::features::inference::{GenerationParams, HiggsClient};
+use crate::features::inference::{GenerationParams, InferenceClient};
 use crate::features::vector_db::VectorIndex;
 use crate::shared::error::AppResult;
 use crate::shared::models::{ChatMessage, StreamEvent};
@@ -22,7 +22,8 @@ const MAX_SUBQUESTIONS: usize = 5;
 
 /// Run the research loop for `topic`.
 pub async fn run(
-    client: &HiggsClient,
+    client: &InferenceClient,
+    params: &GenerationParams,
     index: &VectorIndex,
     topic: &str,
     tx: &mpsc::Sender<StreamEvent>,
@@ -34,7 +35,8 @@ pub async fn run(
     }
 
     log(tx, format!("Planning research for: {topic}")).await;
-    let questions = decompose(client, topic).await.unwrap_or_else(|_| vec![topic.to_string()]);
+    let questions =
+        decompose(client, params, topic).await.unwrap_or_else(|_| vec![topic.to_string()]);
 
     let mut findings: Vec<(String, String)> = Vec::new();
     for (i, q) in questions.iter().enumerate() {
@@ -47,13 +49,17 @@ pub async fn run(
     log(tx, "Synthesizing report…").await;
     let messages = build_report_prompt(topic, &findings);
     let rx = client
-        .stream_chat(messages, GenerationParams { temperature: 0.5, ..Default::default() })
+        .stream_chat(messages, GenerationParams { temperature: 0.5, ..params.clone() })
         .await?;
     forward_stream(rx, tx).await
 }
 
 /// Ask the model to break `topic` into focused sub-questions (structured output).
-async fn decompose(client: &HiggsClient, topic: &str) -> AppResult<Vec<String>> {
+async fn decompose(
+    client: &InferenceClient,
+    params: &GenerationParams,
+    topic: &str,
+) -> AppResult<Vec<String>> {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -74,7 +80,7 @@ async fn decompose(client: &HiggsClient, topic: &str) -> AppResult<Vec<String>> 
         ChatMessage::user(format!("Topic: {topic}")),
     ];
     let value = client
-        .complete_structured(messages, GenerationParams::default(), "research_plan", schema)
+        .complete_structured(messages, params.clone(), "research_plan", schema)
         .await?;
     let questions = value
         .get("questions")

@@ -9,42 +9,56 @@ pub mod features;
 pub mod shared;
 
 use tauri::{Emitter, Manager};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{mpsc, OnceCell, RwLock};
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::features::anki_sync::AnkiClient;
 use crate::features::cognitive_core::Router;
-use crate::features::inference::{GenerationParams, HiggsClient};
+use crate::features::inference::{GenerationParams, InferenceClient};
 use crate::features::vector_db::{VectorIndex, VectorStore};
-use crate::shared::config;
 use crate::shared::error::{AppError, AppResult};
-use crate::shared::models::{Card, ChatMessage, SourceInfo, StreamEvent};
+use crate::shared::models::{AppSettings, Card, ChatMessage, ModelProfile, SourceInfo, StreamEvent};
+use crate::shared::{config, settings};
 
 /// Channel depth for backend→frontend event forwarding.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 /// Upper bound on chunks scanned when listing workspace sources.
 const SOURCE_SCAN_LIMIT: usize = 100_000;
 
-/// Managed application state. The [`Router`] (which loads the embedding model)
-/// and a model-free read-only [`VectorStore`] are each built on first access.
+/// Managed application state. Model-selection [`settings`] are loaded eagerly at
+/// startup and shared with the [`Router`]; the `Router` (which loads the
+/// embedding model) and a model-free read-only [`VectorStore`] are each built on
+/// first access.
 #[derive(Default)]
 struct AppState {
+    settings: Arc<RwLock<AppSettings>>,
     router: OnceCell<Router>,
     store: OnceCell<VectorStore>,
 }
 
 /// Lazily build (once) and borrow the shared [`Router`]. First call loads the
-/// embedding model and opens the database at the default path.
+/// embedding model and opens the database at the default path. The active
+/// inference model is resolved per-request from the shared settings, so this is
+/// built only once regardless of later model switches.
 async fn ensure_router(state: &AppState) -> AppResult<&Router> {
     state
         .router
         .get_or_try_init(|| async {
-            let client = HiggsClient::new();
             let index = VectorIndex::open(config::default_db_path()?).await?;
-            Ok::<Router, AppError>(Router::new(client, index))
+            Ok::<Router, AppError>(Router::new(index, state.settings.clone()))
         })
         .await
+}
+
+/// Build a client + generation params from the active model profile.
+async fn active_client(state: &AppState) -> AppResult<(InferenceClient, GenerationParams)> {
+    let guard = state.settings.read().await;
+    let profile = guard
+        .active_profile()
+        .ok_or_else(|| AppError::Config("no model profile configured".into()))?;
+    Ok((InferenceClient::from_profile(profile), GenerationParams::from_profile(profile)))
 }
 
 /// Lazily open (once) a read-only store connection that does NOT load the
@@ -73,14 +87,69 @@ fn spawn_event_forwarder(
     (tx, handle)
 }
 
-/// Local endpoints the frontend can display / health-check.
+/// Local endpoints the frontend can display / health-check. `inference` and
+/// `activeModel` reflect the currently selected model profile.
 #[tauri::command]
-fn service_endpoints() -> serde_json::Value {
-    serde_json::json!({
-        "inference": config::HIGGS_BASE_URL,
+async fn service_endpoints(state: tauri::State<'_, AppState>) -> AppResult<serde_json::Value> {
+    let guard = state.settings.read().await;
+    let active = guard.active_profile();
+    Ok(serde_json::json!({
+        "inference": active.map(|p| p.base_url.clone()).unwrap_or_default(),
+        "activeModel": active.map(|p| p.label.clone()).unwrap_or_default(),
         "anki": config::ANKI_CONNECT_URL,
         "embeddingModel": config::EMBEDDING_MODEL_ID,
-    })
+    }))
+}
+
+/// List all configured model profiles.
+#[tauri::command]
+async fn list_models(state: tauri::State<'_, AppState>) -> AppResult<Vec<ModelProfile>> {
+    Ok(state.settings.read().await.profiles.clone())
+}
+
+/// Id of the currently active model profile (falls back to the first).
+#[tauri::command]
+async fn active_model(state: tauri::State<'_, AppState>) -> AppResult<Option<String>> {
+    Ok(state.settings.read().await.active_profile().map(|p| p.id.clone()))
+}
+
+/// Select the active model profile and persist the choice.
+#[tauri::command]
+async fn set_active_model(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
+    let mut guard = state.settings.write().await;
+    guard.active_profile_id = Some(id);
+    settings::save(&guard)
+}
+
+/// Insert or update a model profile and persist.
+#[tauri::command]
+async fn save_model(state: tauri::State<'_, AppState>, profile: ModelProfile) -> AppResult<()> {
+    let mut guard = state.settings.write().await;
+    guard.upsert(profile);
+    settings::save(&guard)
+}
+
+/// Delete a model profile and persist (clears the active pointer if it matched).
+#[tauri::command]
+async fn delete_model(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
+    let mut guard = state.settings.write().await;
+    guard.remove(&id);
+    settings::save(&guard)
+}
+
+/// Validate a profile's endpoint + auth with a lightweight `GET /models` probe.
+#[tauri::command]
+async fn test_model(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
+    let client = {
+        let guard = state.settings.read().await;
+        let profile = guard
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| AppError::Config(format!("unknown model profile: {id}")))?;
+        InferenceClient::from_profile(profile)
+    };
+    client.probe().await
 }
 
 /// Route a user input through the cognitive core, streaming `StreamEvent`s on
@@ -166,11 +235,12 @@ async fn anki_sync_cards(deck: String, cards: Vec<Card>) -> AppResult<Vec<Option
 #[tauri::command]
 async fn chat_stream(
     window: tauri::Window,
+    state: tauri::State<'_, AppState>,
     channel: String,
     messages: Vec<ChatMessage>,
 ) -> AppResult<()> {
-    let client = HiggsClient::new();
-    let mut rx = client.stream_chat(messages, GenerationParams::default()).await?;
+    let (client, params) = active_client(&state).await?;
+    let mut rx = client.stream_chat(messages, params).await?;
     let (tx, forwarder) = spawn_event_forwarder(window, channel);
 
     tokio::spawn(async move {
@@ -196,7 +266,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            app.manage(AppState::default());
+            // Load persisted model settings; fall back to defaults on any error
+            // so a malformed file never blocks startup.
+            let loaded = settings::load().unwrap_or_default();
+            app.manage(AppState {
+                settings: Arc::new(RwLock::new(loaded)),
+                ..Default::default()
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -209,7 +285,13 @@ pub fn run() {
             generate_cards,
             anki_status,
             anki_sync_cards,
-            chat_stream
+            chat_stream,
+            list_models,
+            active_model,
+            set_active_model,
+            save_model,
+            delete_model,
+            test_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -7,7 +7,7 @@
 use tokio::sync::mpsc;
 
 use super::{forward_stream, format_context};
-use crate::features::inference::{GenerationParams, HiggsClient};
+use crate::features::inference::{GenerationParams, InferenceClient};
 use crate::features::vector_db::VectorIndex;
 use crate::shared::error::AppResult;
 use crate::shared::models::{ChatMessage, RetrievedChunk, StreamEvent};
@@ -23,14 +23,15 @@ Output only the single question — no preamble, no follow-up.";
 
 /// Retrieve context around the student's input and stream a single challenge.
 pub async fn run(
-    client: &HiggsClient,
+    client: &InferenceClient,
+    params: &GenerationParams,
     index: &VectorIndex,
     input: &str,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> AppResult<()> {
     let chunks = index.retrieve(input).await.unwrap_or_default();
     let messages = build_prompt(input, &chunks);
-    let rx = client.stream_chat(messages, GenerationParams::default()).await?;
+    let rx = client.stream_chat(messages, params.clone()).await?;
     forward_stream(rx, tx).await
 }
 

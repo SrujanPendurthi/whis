@@ -1,14 +1,14 @@
-//! Local inference subsystem.
+//! Inference subsystem.
 //!
-//! Public surface: the [`HiggsClient`] (streaming + structured completions) and
-//! the [`extract_cards`] helper that constrains the model to emit strict Anki
-//! card JSON.
+//! Public surface: the [`InferenceClient`] (streaming + structured completions
+//! against any OpenAI-compatible endpoint) and the [`extract_cards`] helper that
+//! constrains the model to emit strict Anki card JSON.
 
 pub mod higgs_client;
 
 use serde_json::json;
 
-pub use higgs_client::{GenerationParams, HiggsClient};
+pub use higgs_client::{GenerationParams, InferenceClient};
 
 use crate::shared::error::AppResult;
 use crate::shared::models::{Card, ChatMessage};
@@ -45,7 +45,7 @@ struct CardsEnvelope {
 
 /// Generate Anki cards from `messages` using strict JSON-schema output.
 pub async fn extract_cards(
-    client: &HiggsClient,
+    client: &InferenceClient,
     messages: Vec<ChatMessage>,
     params: GenerationParams,
 ) -> AppResult<Vec<Card>> {

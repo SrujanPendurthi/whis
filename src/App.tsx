@@ -4,6 +4,7 @@ import { CommandBar } from "./features/chat/components/CommandBar";
 import { PlanViewer } from "./features/study-planner/components/PlanViewer";
 import { ResearchTerminal } from "./features/deep-research/components/ResearchTerminal";
 import { CardStagingArea } from "./features/anki/components/CardStagingArea";
+import { ModelSwitcher } from "./features/settings/components/ModelSwitcher";
 import { useWhis } from "./shared/state/WhisContext";
 import { cn } from "./shared/utils/cn";
 import type { RightTab } from "./shared/types";
@@ -53,6 +54,10 @@ function App() {
     <div className="grid h-full grid-cols-[260px_minmax(0,1fr)_380px] bg-neutral-950 text-neutral-100">
       <Sidebar />
       <main className="flex min-h-0 flex-col">
+        <header className="flex shrink-0 items-center justify-between border-b border-neutral-800 bg-neutral-950 px-3 py-2">
+          <span className="text-xs font-medium text-neutral-400">whis</span>
+          <ModelSwitcher />
+        </header>
         <ChatThread />
         <CommandBar />
       </main>

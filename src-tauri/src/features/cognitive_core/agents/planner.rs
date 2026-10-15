@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 use super::{forward_stream, log};
-use crate::features::inference::{GenerationParams, HiggsClient};
+use crate::features::inference::{GenerationParams, InferenceClient};
 use crate::features::vector_db::VectorIndex;
 use crate::shared::error::AppResult;
 use crate::shared::models::{ChatMessage, DocumentChunk, StreamEvent};
@@ -30,7 +30,8 @@ pub struct WorkspaceMetrics {
 
 /// Scan the workspace, compute metrics, and stream a markdown syllabus.
 pub async fn run(
-    client: &HiggsClient,
+    client: &InferenceClient,
+    params: &GenerationParams,
     index: &VectorIndex,
     topic: &str,
     tx: &mpsc::Sender<StreamEvent>,
@@ -50,7 +51,10 @@ pub async fn run(
 
     let sample: Vec<&DocumentChunk> = chunks.iter().take(SAMPLE_SIZE).collect();
     let messages = build_prompt(topic, &metrics, &sample);
-    let rx = client.stream_chat(messages, GenerationParams { temperature: 0.4, ..Default::default() }).await?;
+    // Low temperature for a deterministic plan; model comes from the profile.
+    let rx = client
+        .stream_chat(messages, GenerationParams { temperature: 0.4, ..params.clone() })
+        .await?;
     forward_stream(rx, tx).await
 }
 

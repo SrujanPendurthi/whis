@@ -5,15 +5,16 @@
 //! stream event.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use super::agents;
-use crate::features::inference::{extract_cards, GenerationParams, HiggsClient};
+use crate::features::inference::{extract_cards, GenerationParams, InferenceClient};
 use crate::features::ingestion;
 use crate::features::vector_db::VectorIndex;
-use crate::shared::error::AppResult;
-use crate::shared::models::{Card, ChatMessage, StreamEvent};
+use crate::shared::error::{AppError, AppResult};
+use crate::shared::models::{AppSettings, Card, ChatMessage, StreamEvent};
 
 /// The recognized command states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,15 +57,27 @@ pub fn parse(input: &str) -> ParsedInput {
     }
 }
 
-/// Holds the shared subsystems and routes a request to the right agent.
+/// Holds the shared subsystems and routes a request to the right agent. The
+/// active inference target is resolved from the shared [`AppSettings`] on every
+/// request, so switching models takes effect immediately without a rebuild.
 pub struct Router {
-    client: HiggsClient,
     index: VectorIndex,
+    settings: Arc<RwLock<AppSettings>>,
 }
 
 impl Router {
-    pub fn new(client: HiggsClient, index: VectorIndex) -> Self {
-        Self { client, index }
+    pub fn new(index: VectorIndex, settings: Arc<RwLock<AppSettings>>) -> Self {
+        Self { index, settings }
+    }
+
+    /// Build a client + generation params from the currently active model
+    /// profile. Errors if no profile is configured.
+    async fn resolve_active(&self) -> AppResult<(InferenceClient, GenerationParams)> {
+        let guard = self.settings.read().await;
+        let profile = guard
+            .active_profile()
+            .ok_or_else(|| AppError::Config("no model profile configured".into()))?;
+        Ok((InferenceClient::from_profile(profile), GenerationParams::from_profile(profile)))
     }
 
     /// Parse `input` and run the matching agent, streaming content events into
@@ -74,15 +87,18 @@ impl Router {
         input: &str,
         tx: &mpsc::Sender<StreamEvent>,
     ) -> AppResult<()> {
+        let (client, params) = self.resolve_active().await?;
         let ParsedInput { command, payload } = parse(input);
         match command {
-            Command::Chat => agents::rag::run(&self.client, &self.index, &payload, tx).await,
-            Command::Plan => agents::planner::run(&self.client, &self.index, &payload, tx).await,
+            Command::Chat => agents::rag::run(&client, &params, &self.index, &payload, tx).await,
+            Command::Plan => {
+                agents::planner::run(&client, &params, &self.index, &payload, tx).await
+            }
             Command::DeepResearch => {
-                agents::researcher::run(&self.client, &self.index, &payload, tx).await
+                agents::researcher::run(&client, &params, &self.index, &payload, tx).await
             }
             Command::Socratic => {
-                agents::socratic::run(&self.client, &self.index, &payload, tx).await
+                agents::socratic::run(&client, &params, &self.index, &payload, tx).await
             }
         }
     }
@@ -114,6 +130,7 @@ impl Router {
     /// Generate Anki flashcards grounded in retrieved context for `topic`.
     /// The cards are staged (returned) for the user to review before syncing.
     pub async fn generate_cards(&self, topic: &str) -> AppResult<Vec<Card>> {
+        let (client, params) = self.resolve_active().await?;
         let chunks = self.index.retrieve(topic).await.unwrap_or_default();
         let context = agents::format_context(&chunks);
         let system = "You create high-quality Anki flashcards from the provided \
@@ -122,7 +139,7 @@ impl Router {
             relevant lowercase tags per card.";
         let user = format!("Topic: {topic}\n\nContext:\n{context}");
         let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
-        extract_cards(&self.client, messages, GenerationParams::default()).await
+        extract_cards(&client, messages, params).await
     }
 }
 
